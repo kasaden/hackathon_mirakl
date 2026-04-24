@@ -1,0 +1,392 @@
+{
+  "name": "v3 UC3 MVP 1 - Collect Signals with OpenAI",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "d0da3281-95f7-4a5f-9e97-356ad2c84730",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "**REPLACE_WORKSHEET_ID**",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "**REPLACE_SHEET_NAME**",
+          "mode": "list",
+          "cachedResultName": "seed_market_signals",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/**REPLACE_WORKSHEET_ID**/edit#gid=**REPLACE_SHEET_GID**"
+        },
+        "options": {}
+      },
+      "id": "7baa9139-6eb3-4d3d-bbaf-4572a5eae7f8",
+      "name": "Read seed_market_signals",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        272,
+        0
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "ERU5W8Lro76UsixY",
+          "name": "Google Sheets OAuth2 API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\nreturn items.map((item, index) => {\n  const row = item.json;\n  return {\n    json: {\n      signal_id: (row.signal_id || `sig_${Date.now()}_${index}`).replace('seed','sig'),\n      query_id: row.query_id || 'q_001',\n      company: row.company || 'Unknown',\n      original_signal_type: row.signal_type || 'other',\n      source_name: row.source_name || 'Seed dataset',\n      source_url: row.source_url || '',\n      title: row.title || '',\n      summary: row.summary || '',\n      detected_skills_seed: row.detected_skills || '',\n      location: row.location || 'France',\n      role_family: row.role_family || 'AI Engineering',\n      signal_date: row.signal_date || new Date().toISOString().slice(0,10),\n      created_at: new Date().toISOString().slice(0,10)\n    }\n  };\n});\n"
+      },
+      "id": "e8ee3e9c-6282-49ea-ba38-954280959eea",
+      "name": "Prepare Signals for OpenAI",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        528,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer sk-proj--**REPLACE**"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"gpt-4o-mini\",\n  \"temperature\": 0.2,\n  \"response_format\": {\"type\": \"json_object\"},\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a Talent Market Intelligence analyst for Mirakl. Focus on France only. Classify public market signals for Senior AI Engineer sourcing. Treat signals as probabilistic, not certain. Return valid JSON only.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Target role: Senior AI Engineer in France for Mirakl. Signal: Company={{$json.company}}; Original type={{$json.original_signal_type}}; Title={{$json.title}}; Summary={{$json.summary}}; Seed skills={{$json.detected_skills_seed}}; Location={{$json.location}}; URL={{$json.source_url}}. Return exactly this JSON shape: {\\\"signal_type\\\":\\\"job_posting | product_news | github | tech_content | funding | layoff | org_change | other\\\",\\\"role_relevance\\\":\\\"High | Medium | Low\\\",\\\"france_relevance\\\":\\\"High | Medium | Low\\\",\\\"confidence\\\":\\\"High | Medium | Low\\\",\\\"detected_skills\\\":[\\\"skill1\\\"],\\\"interpretation\\\":\\\"one sentence\\\",\\\"recommended_ta_action\\\":\\\"Act now | Watch | Ignore\\\"}\"\n    }\n  ]\n}",
+        "options": {}
+      },
+      "id": "546c82d9-6a89-430b-85c8-47094df8b1ab",
+      "name": "OpenAI - Classify Signal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        800,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nreturn items.map((item, index) => {\n  const source = $items('Prepare Signals for OpenAI')[index].json;\n  let raw = item.json.choices?.[0]?.message?.content || item.json.message?.content || item.json.output_text || item.json.text || '';\n  raw = raw.replace(/```json/g, '').replace(/```/g, '').trim();\n  let parsed;\n  try { parsed = JSON.parse(raw); } catch (e) {\n    parsed = {\n      signal_type: source.original_signal_type || 'other',\n      role_relevance: 'Medium',\n      france_relevance: (source.location || '').toLowerCase().includes('france') || (source.location || '').toLowerCase().includes('paris') ? 'High' : 'Medium',\n      confidence: 'Low',\n      detected_skills: source.detected_skills_seed ? source.detected_skills_seed.split(';').map(s => s.trim()) : [],\n      interpretation: `${source.company} has a public signal that may be relevant to Mirakl sourcing.`,\n      recommended_ta_action: 'Watch'\n    };\n  }\n  return { json: {\n    signal_id: source.signal_id,\n    query_id: source.query_id,\n    company: source.company,\n    signal_type: parsed.signal_type || source.original_signal_type || 'other',\n    source_name: source.source_name,\n    source_url: source.source_url,\n    title: source.title,\n    summary: source.summary,\n    detected_skills: Array.isArray(parsed.detected_skills) ? parsed.detected_skills.join('; ') : (parsed.detected_skills || source.detected_skills_seed || ''),\n    location: source.location,\n    role_family: source.role_family,\n    role_relevance: parsed.role_relevance || 'Medium',\n    france_relevance: parsed.france_relevance || 'Medium',\n    confidence: parsed.confidence || 'Low',\n    interpretation: parsed.interpretation || '',\n    recommended_ta_action: parsed.recommended_ta_action || 'Watch',\n    signal_date: source.signal_date,\n    created_at: source.created_at\n  }};\n});\n"
+      },
+      "id": "833b5a9d-b8a1-4f26-a159-313b92b918f9",
+      "name": "Parse OpenAI Signal JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1088,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "**REPLACE_WORKSHEET_ID**",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "**REPLACE_SHEET_NAME**",
+          "mode": "list",
+          "cachedResultName": "market_signals",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/**REPLACE_WORKSHEET_ID**/edit#gid=**REPLACE_SHEET_GID**"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "signal_id": "={{ $json.signal_id }}",
+            "query_id": "={{ $json.query_id }}",
+            "company": "={{ $json.company }}",
+            "signal_type": "={{ $json.signal_type }}",
+            "source_name": "={{ $json.source_name }}",
+            "source_url": "={{ $json.source_url }}",
+            "title": "={{ $json.title }}",
+            "summary": "={{ $json.summary }}",
+            "detected_skills": "={{ $json.detected_skills }}",
+            "role_family": "={{ $json.role_family }}",
+            "location": "={{ $json.location }}",
+            "signal_date": "={{ $json.signal_date }}",
+            "created_at": "={{ $json.created_at }}",
+            "role_relevance": "={{ $json.role_relevance }}",
+            "confidence": "={{ $json.confidence }}",
+            "interpretation": "={{ $json.interpretation }}",
+            "france_relevance": "={{ $json.france_relevance }}",
+            "recommended_ta_action": "={{ $json.recommended_ta_action }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "signal_id",
+              "displayName": "signal_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "query_id",
+              "displayName": "query_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "company",
+              "displayName": "company",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "signal_type",
+              "displayName": "signal_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "source_name",
+              "displayName": "source_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "source_url",
+              "displayName": "source_url",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "title",
+              "displayName": "title",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "summary",
+              "displayName": "summary",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "detected_skills",
+              "displayName": "detected_skills",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "location",
+              "displayName": "location",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "role_family",
+              "displayName": "role_family",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "signal_date",
+              "displayName": "signal_date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "role_relevance",
+              "displayName": "role_relevance",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "france_relevance",
+              "displayName": "france_relevance",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "confidence",
+              "displayName": "confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "interpretation",
+              "displayName": "interpretation",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "recommended_ta_action",
+              "displayName": "recommended_ta_action",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "3cb09223-80b0-43d7-ac5c-1f66e914c722",
+      "name": "Append market_signals",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1360,
+        0
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "ERU5W8Lro76UsixY",
+          "name": "Google Sheets OAuth2 API"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read seed_market_signals",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read seed_market_signals": {
+      "main": [
+        [
+          {
+            "node": "Prepare Signals for OpenAI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Signals for OpenAI": {
+      "main": [
+        [
+          {
+            "node": "OpenAI - Classify Signal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI - Classify Signal": {
+      "main": [
+        [
+          {
+            "node": "Parse OpenAI Signal JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse OpenAI Signal JSON": {
+      "main": [
+        [
+          {
+            "node": "Append market_signals",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "187c7069-d2c8-4d86-a5ec-46175903c0f7",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "f77a87671be770b6d9ddd8adb5517f104760a4bca53f9786441e20f0d0b605dd"
+  },
+  "id": "AHj1xfIJwfCxkX7Q",
+  "tags": []
+}
