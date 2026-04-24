@@ -1,0 +1,889 @@
+{
+  "name": "v3 UC3 MVP 2 - Talent Intelligence with OpenAI + Latent Seniority",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "7f2a2187-9d9f-4ba4-af55-0df302ac31be",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -256,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "**REPLACE_WORKSHEET_ID**",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "**REPLACE_SHEET_NAME**",
+          "mode": "list",
+          "cachedResultName": "market_signals",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/**REPLACE_WORKSHEET_ID**/edit#gid=**REPLACE_SHEET_GID**"
+        },
+        "options": {}
+      },
+      "id": "54dba056-514b-4e46-8085-866119d9d811",
+      "name": "Read market_signals",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        0,
+        0
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "ERU5W8Lro76UsixY",
+          "name": "Google Sheets OAuth2 API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst grouped = {};\nfor (const item of items) {\n  const s = item.json;\n  const company = s.company || 'Unknown';\n  if (!grouped[company]) grouped[company] = { company, query_id: s.query_id || 'q_001', signals: [], high_relevance_count: 0, medium_relevance_count: 0, job_posting_count: 0, product_signal_count: 0, tech_signal_count: 0 };\n  grouped[company].signals.push({ signal_type: s.signal_type, title: s.title, summary: s.summary, detected_skills: s.detected_skills, role_relevance: s.role_relevance, confidence: s.confidence, interpretation: s.interpretation, recommended_ta_action: s.recommended_ta_action, source_url: s.source_url });\n  if (s.role_relevance === 'High') grouped[company].high_relevance_count++;\n  if (s.role_relevance === 'Medium') grouped[company].medium_relevance_count++;\n  if (s.signal_type === 'job_posting') grouped[company].job_posting_count++;\n  if (s.signal_type === 'product_news') grouped[company].product_signal_count++;\n  if (s.signal_type === 'github' || s.signal_type === 'tech_content') grouped[company].tech_signal_count++;\n}\nreturn Object.values(grouped).map((g, index) => ({ json: { pool_id: `pool_${String(index+1).padStart(3,'0')}`, ...g }}));\n"
+      },
+      "id": "341e24da-dbd7-4ec4-a546-790cd3c73636",
+      "name": "Group Signals by Company",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        272,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer sk-proj--**REPLACE**"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  {\n    \"model\": \"gpt-4o-mini\",\n    \"temperature\": 0.2,\n    \"response_format\": {\n      \"type\": \"json_object\"\n    },\n    \"messages\": [\n      {\n        \"role\": \"system\",\n        \"content\": \"You are a Head of Talent Acquisition and AI Talent Intelligence expert working for Mirakl. You rank companies in France by sourcing opportunity for scarce AI talent. You are opinionated, concrete, and business-oriented. Return valid JSON only.\"\n      },\n      {\n        \"role\": \"user\",\n        \"content\": \"Goal:\\nRank this company in France by sourcing opportunity for the role: Senior AI Engineer.\\n\\nMirakl context:\\nMirakl needs production-oriented AI engineers able to work on agentic commerce, marketplace intelligence, LLM systems, RAG, data pipelines, and scalable AI products.\\n\\nCompany signal bundle:\\n\" + JSON.stringify($json) + \"\\n\\nScoring logic:\\n- Talent density: are relevant profiles likely to exist there?\\n- Signal strength: how strong are the public signals?\\n- France relevance: are the teams likely in France?\\n- Mobility window: is there a reason to approach now?\\n- Mirakl fit: does the company environment map to Mirakl's needs?\\n\\nReturn valid JSON with exactly these keys:\\n{\\n  \\\"company\\\": \\\"\\\",\\n  \\\"talent_density_score\\\": 0,\\n  \\\"signal_strength_score\\\": 0,\\n  \\\"france_relevance_score\\\": 0,\\n  \\\"mobility_score\\\": 0,\\n  \\\"mirakl_fit_score\\\": 0,\\n  \\\"global_priority_score\\\": 0,\\n  \\\"priority\\\": \\\"Act now\\\",\\n  \\\"likely_teams\\\": [],\\n  \\\"why_it_matters\\\": \\\"\\\",\\n  \\\"recommended_sourcing_action\\\": \\\"\\\",\\n  \\\"best_outreach_narrative\\\": \\\"\\\"\\n}\"\n      }\n    ]\n  }\n}}",
+        "options": {}
+      },
+      "id": "8d43261d-4b6f-42f7-b7bc-8152e6eca8d4",
+      "name": "OpenAI - Score Talent Pool",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        544,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nreturn items.map((item, index) => {\n  const source = $items('Group Signals by Company')[index].json;\n  let raw = item.json.choices?.[0]?.message?.content || item.json.message?.content || item.json.output_text || item.json.text || '';\n  raw = raw.replace(/```json/g, '').replace(/```/g, '').trim();\n  let p;\n  try { p = JSON.parse(raw); } catch(e) {\n    const score = Math.min(95, 50 + source.high_relevance_count*10 + source.job_posting_count*5 + source.tech_signal_count*5);\n    p = { company: source.company, talent_density_score: score, signal_strength_score: score, france_relevance_score: 80, mobility_score: 55, mirakl_fit_score: score, global_priority_score: score, priority: score >= 75 ? 'Act now' : 'Watch', likely_teams: ['AI Engineering','ML Platform'], why_it_matters: `${source.company} has relevant AI signals.`, recommended_sourcing_action: 'Validate profiles manually and prepare signal-based outreach.', best_outreach_narrative: 'Production AI and agentic commerce at marketplace scale.' };\n  }\n  return { json: {\n    pool_id: source.pool_id, query_id: source.query_id || 'q_001', company: p.company || source.company, talent_density_score: p.talent_density_score || 0, signal_strength_score: p.signal_strength_score || 0, france_relevance_score: p.france_relevance_score || 0, mobility_score: p.mobility_score || 0, mirakl_fit_score: p.mirakl_fit_score || 0, global_priority_score: p.global_priority_score || 0, priority: p.priority || 'Watch', likely_teams: Array.isArray(p.likely_teams) ? p.likely_teams.join('; ') : (p.likely_teams || ''), why_it_matters: p.why_it_matters || '', recommended_sourcing_action: p.recommended_sourcing_action || '', best_outreach_narrative: p.best_outreach_narrative || '', created_at: new Date().toISOString().slice(0,10)\n  }};\n});\n"
+      },
+      "id": "3a8591bb-1ff8-4a36-aca1-efff7c3b7dff",
+      "name": "Parse Talent Pool JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        832,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "**REPLACE_WORKSHEET_ID**",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "**REPLACE_SHEET_NAME**",
+          "mode": "list",
+          "cachedResultName": "talent_pools",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/**REPLACE_WORKSHEET_ID**/edit#gid=**REPLACE_SHEET_GID**"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "created_at": "={{ $json.created_at }}",
+            "best_outreach_narrative": "={{ $json.best_outreach_narrative }}",
+            "recommended_sourcing_action": "={{ $json.recommended_sourcing_action }}",
+            "why_it_matters": "={{ $json.why_it_matters }}",
+            "likely_teams": "={{ $json.likely_teams }}",
+            "priority": "={{ $json.priority }}",
+            "global_priority_score": "={{ $json.global_priority_score }}",
+            "mobility_score": "={{ $json.mobility_score }}",
+            "mirakl_fit_score": "={{ $json.mirakl_fit_score }}",
+            "france_relevance_score": "={{ $json.france_relevance_score }}",
+            "signal_strength_score": "={{ $json.signal_strength_score }}",
+            "talent_density_score": "={{ $json.talent_density_score }}",
+            "company": "={{ $json.company }}",
+            "query_id": "={{ $json.query_id }}",
+            "pool_id": "={{ $json.pool_id }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "pool_id",
+              "displayName": "pool_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "query_id",
+              "displayName": "query_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "company",
+              "displayName": "company",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "talent_density_score",
+              "displayName": "talent_density_score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "signal_strength_score",
+              "displayName": "signal_strength_score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "france_relevance_score",
+              "displayName": "france_relevance_score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "mobility_score",
+              "displayName": "mobility_score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "mirakl_fit_score",
+              "displayName": "mirakl_fit_score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "global_priority_score",
+              "displayName": "global_priority_score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "priority",
+              "displayName": "priority",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "likely_teams",
+              "displayName": "likely_teams",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "why_it_matters",
+              "displayName": "why_it_matters",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "recommended_sourcing_action",
+              "displayName": "recommended_sourcing_action",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "best_outreach_narrative",
+              "displayName": "best_outreach_narrative",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "55f99649-5d2c-4322-8e63-cd8c6fcc7e7a",
+      "name": "Append talent_pools",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1104,
+        0
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "ERU5W8Lro76UsixY",
+          "name": "Google Sheets OAuth2 API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "**REPLACE_WORKSHEET_ID**",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "**REPLACE_SHEET_NAME**",
+          "mode": "list",
+          "cachedResultName": "candidate_seed",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/**REPLACE_WORKSHEET_ID**/edit#gid=**REPLACE_SHEET_GID**"
+        },
+        "options": {}
+      },
+      "id": "391dfd47-e134-471a-a547-f2fd9e12136a",
+      "name": "Read candidate_seed",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        0,
+        432
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "ERU5W8Lro76UsixY",
+          "name": "Google Sheets OAuth2 API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer sk-proj--**REPLACE**"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  {\n    \"model\": \"gpt-4o-mini\",\n    \"temperature\": 0.2,\n    \"response_format\": {\n      \"type\": \"json_object\"\n    },\n    \"messages\": [\n      {\n        \"role\": \"system\",\n        \"content\": \"You are a senior technical recruiter specialized in AI talent in France. You generate recruiter-ready candidate intelligence for Mirakl. Rules: Do not claim the candidate is verified. If candidate data comes from a demo seed, confidence should be Medium or Low. Explain why the profile is relevant using signal-based reasoning. Generate a personalized Mirakl outreach angle. Keep the tone premium, direct, and credible. Return valid JSON only.\"\n      },\n      {\n        \"role\": \"user\",\n        \"content\": \"Role:\\nSenior AI Engineer\\n\\nCandidate:\\n\" + JSON.stringify($json) + \"\\n\\nMirakl context:\\nMirakl builds marketplace and agentic commerce infrastructure. The candidate should be attracted by production AI, large-scale commerce data, marketplace complexity, and enterprise-grade systems.\\n\\nReturn valid JSON with exactly these keys:\\n{\\n  \\\"candidate_name\\\": \\\"\\\",\\n  \\\"current_company\\\": \\\"\\\",\\n  \\\"current_title\\\": \\\"\\\",\\n  \\\"location\\\": \\\"\\\",\\n  \\\"linkedin_url\\\": \\\"\\\",\\n  \\\"fit_score\\\": 0,\\n  \\\"confidence\\\": \\\"Medium\\\",\\n  \\\"detected_signals\\\": [],\\n  \\\"why_detected\\\": \\\"\\\",\\n  \\\"personalized_outreach_angle\\\": \\\"\\\",\\n  \\\"first_message\\\": \\\"\\\",\\n  \\\"recommended_status\\\": \\\"Validate manually\\\"\\n}\"\n      }\n    ]\n  }\n}}",
+        "options": {}
+      },
+      "id": "06429209-8416-4e22-b40e-89f2d82906b2",
+      "name": "OpenAI - Generate Candidate Intelligence",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        272,
+        432
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nreturn items.map((item, index) => {\n  const source = $items('Read candidate_seed')[index].json;\n  let raw = item.json.choices?.[0]?.message?.content || item.json.message?.content || item.json.output_text || item.json.text || '';\n  raw = raw.replace(/```json/g, '').replace(/```/g, '').trim();\n  let p;\n  try { p = JSON.parse(raw); } catch(e) {\n    p = { candidate_name: source.full_name || source.name, current_company: source.current_company, current_title: source.current_title, location: source.location, linkedin_url: source.linkedin_url, fit_score: 75, confidence: 'Medium', detected_signals: [source.public_signal || 'Demo seed'], why_detected: source.public_signal || 'Demo seed profile aligned with target role.', personalized_outreach_angle: 'Agentic commerce and production AI at marketplace scale.', first_message: `Hi ${(source.full_name || source.name || '').split(' ')[0]}, your experience at ${source.current_company} looks relevant to Mirakl's work in production AI and agentic commerce.`, recommended_status: 'Validate manually' };\n  }\n  return { json: {\n    candidate_id: source.candidate_id, query_id: 'q_001', candidate_name: p.candidate_name || source.full_name || source.name, current_company: p.current_company || source.current_company, current_title: p.current_title || source.current_title, location: p.location || source.location, linkedin_url: p.linkedin_url || source.linkedin_url, fit_score: p.fit_score || 0, confidence: p.confidence || 'Medium', detected_signals: Array.isArray(p.detected_signals) ? p.detected_signals.join('; ') : (p.detected_signals || ''), why_detected: p.why_detected || '', personalized_outreach_angle: p.personalized_outreach_angle || '', first_message: p.first_message || '', recommended_status: p.recommended_status || 'Validate manually',\n    tenure_years_current_company: source.tenure_years_current_company || '', previous_company: source.previous_company || '', previous_title: source.previous_title || '', profile_last_updated: source.profile_last_updated || '', public_activity_level: source.public_activity_level || '', role_family: source.role_family || '', skill_tags: source.skill_tags || '', source_type: source.source_type || '', verification_status: source.verification_status || '', public_signal: source.public_signal || '', note: source.note || '', created_at: new Date().toISOString().slice(0,10)\n  }};\n});\n"
+      },
+      "id": "ef1af643-82b7-4b1d-ba59-adc2ef69aff2",
+      "name": "Parse Candidate JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        544,
+        432
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer sk-proj--**REPLACE**"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{\n  {\n    \"model\": \"gpt-4o-mini\",\n    \"temperature\": 0.2,\n    \"response_format\": {\n      \"type\": \"json_object\"\n    },\n    \"messages\": [\n      {\n        \"role\": \"system\",\n        \"content\": \"You are a senior Talent Intelligence analyst for Mirakl. Your job is to infer whether a candidate may be more senior than their visible title suggests. Use tenure in current company, profile freshness, company environment, role family, skill tags, and Mirakl role needs. Do not claim certainty. Use words like likely, may indicate, suggests. Focus on France. Be compliant: do not infer sensitive attributes. Return valid JSON only.\"\n      },\n      {\n        \"role\": \"user\",\n        \"content\": \"Mirakl target role:\\nSenior AI Engineer\\n\\nCandidate and previous candidate intelligence:\\n\" + JSON.stringify($json) + \"\\n\\nEvaluate whether this person may be a latent senior profile.\\n\\nScoring logic:\\n- tenure_years_current_company >= 3 increases seniority signal\\n- profile_last_updated older than 18 months increases under-visibility signal\\n- public_activity_level Low or Medium may indicate the profile is under-detected by classic sourcing\\n- strong company environments such as Dataiku, Dust, Criteo, Contentsquare, Doctolib, Mistral AI, Alan, Back Market increase confidence\\n- AI, ML, Data, Platform, Backend, LLM, Agent or RAG skill tags increase relevance\\n\\nReturn valid JSON with exactly these keys:\\n{\\n  \\\"candidate_name\\\": \\\"\\\",\\n  \\\"inferred_seniority\\\": \\\"Mid | Senior | Staff potential | Unclear\\\",\\n  \\\"latent_seniority_score\\\": 0,\\n  \\\"tenure_signal\\\": \\\"\\\",\\n  \\\"profile_freshness_signal\\\": \\\"\\\",\\n  \\\"company_environment_signal\\\": \\\"\\\",\\n  \\\"mobility_signal\\\": \\\"Reach out now | Watch | Low priority\\\",\\n  \\\"seniority_reasoning\\\": \\\"\\\",\\n  \\\"recommended_approach_timing\\\": \\\"Now | Later | Watchlist\\\",\\n  \\\"latent_outreach_angle\\\": \\\"\\\"\\n}\"\n      }\n    ]\n  }\n}}",
+        "options": {}
+      },
+      "id": "5e95e68c-bd05-41ce-879d-b975f7a4fb06",
+      "name": "OpenAI - Infer Latent Seniority",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        832,
+        432
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nreturn items.map((item, index) => {\n  const base = $items('Parse Candidate JSON')[index].json;\n  let raw = item.json.choices?.[0]?.message?.content || item.json.message?.content || item.json.output_text || item.json.text || '';\n  raw = raw.replace(/```json/g, '').replace(/```/g, '').trim();\n  let p;\n  try { p = JSON.parse(raw); } catch(e) {\n    const tenure = Number(base.tenure_years_current_company || 0);\n    const score = Math.min(95, 55 + tenure * 8 + (String(base.public_activity_level).toLowerCase() === 'low' ? 8 : 0));\n    p = { candidate_name: base.candidate_name, inferred_seniority: score >= 80 ? 'Senior' : 'Mid', latent_seniority_score: score, tenure_signal: `${tenure || 'Unknown'} years in current company may indicate accumulated expertise.`, profile_freshness_signal: `Public activity level: ${base.public_activity_level || 'Unknown'}.`, company_environment_signal: `${base.current_company} is a relevant environment for AI/product engineering talent.`, mobility_signal: score >= 78 ? 'Reach out now' : 'Watch', seniority_reasoning: 'Latent seniority inferred from tenure, company context and role adjacency. Validate manually before outreach.', recommended_approach_timing: score >= 78 ? 'Now' : 'Watchlist', outreach_angle: base.personalized_outreach_angle || 'Production AI at marketplace scale.' };\n  }\n  return { json: {\n    ...base,\n    inferred_seniority: p.inferred_seniority || 'Unclear',\n    latent_seniority_score: p.latent_seniority_score || 0,\n    tenure_signal: p.tenure_signal || '',\n    profile_freshness_signal: p.profile_freshness_signal || '',\n    company_environment_signal: p.company_environment_signal || '',\n    mobility_signal: p.mobility_signal || 'Watch',\n    seniority_reasoning: p.seniority_reasoning || '',\n    recommended_approach_timing: p.recommended_approach_timing || 'Watchlist',\n    latent_outreach_angle: p.outreach_angle || '',\n    created_at: new Date().toISOString().slice(0,10)\n  }};\n});\n"
+      },
+      "id": "cc4d55a4-33dd-442b-99b4-c69af33a3f1b",
+      "name": "Parse Latent Seniority JSON",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1104,
+        432
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "**REPLACE_WORKSHEET_ID**",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "**REPLACE_SHEET_NAME**",
+          "mode": "list",
+          "cachedResultName": "candidate_leads",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/**REPLACE_WORKSHEET_ID**/edit#gid=**REPLACE_SHEET_GID**"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "candidate_id": "={{ $json.candidate_id }}",
+            "query_id": "={{ $json.query_id }}",
+            "candidate_name": "={{ $json.candidate_name }}",
+            "current_company": "={{ $json.current_company }}",
+            "current_title": "={{ $json.current_title }}",
+            "location": "={{ $json.location }}",
+            "linkedin_url": "={{ $json.linkedin_url }}",
+            "fit_score": "={{ $json.fit_score }}",
+            "confidence": "={{ $json.confidence }}",
+            "detected_signals": "={{ $json.detected_signals }}",
+            "why_detected": "={{ $json.why_detected }}",
+            "personalized_outreach_angle": "={{ $json.personalized_outreach_angle }}",
+            "first_message": "={{ $json.first_message }}",
+            "recommended_status": "={{ $json.recommended_status }}",
+            "tenure_years_current_company": "={{ $json.tenure_years_current_company }}",
+            "previous_company": "={{ $json.previous_company }}",
+            "previous_title": "={{ $json.previous_title }}",
+            "profile_last_updated": "={{ $json.profile_last_updated }}",
+            "public_activity_level": "={{ $json.public_activity_level }}",
+            "role_family": "={{ $json.role_family }}",
+            "skill_tags": "={{ $json.skill_tags }}",
+            "inferred_seniority": "={{ $json.inferred_seniority }}",
+            "latent_seniority_score": "={{ $json.latent_seniority_score }}",
+            "tenure_signal": "={{ $json.tenure_signal }}",
+            "profile_freshness_signal": "={{ $json.profile_freshness_signal }}",
+            "company_environment_signal": "={{ $json.company_environment_signal }}",
+            "mobility_signal": "={{ $json.mobility_signal }}",
+            "seniority_reasoning": "={{ $json.seniority_reasoning }}",
+            "recommended_approach_timing": "={{ $json.recommended_approach_timing }}",
+            "latent_outreach_angle": "={{ $json.latent_outreach_angle }}",
+            "created_at": "={{ $json.created_at }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "candidate_id",
+              "displayName": "candidate_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "query_id",
+              "displayName": "query_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "candidate_name",
+              "displayName": "candidate_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "current_company",
+              "displayName": "current_company",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "current_title",
+              "displayName": "current_title",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "location",
+              "displayName": "location",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "linkedin_url",
+              "displayName": "linkedin_url",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "fit_score",
+              "displayName": "fit_score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "confidence",
+              "displayName": "confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "detected_signals",
+              "displayName": "detected_signals",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "why_detected",
+              "displayName": "why_detected",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "personalized_outreach_angle",
+              "displayName": "personalized_outreach_angle",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "first_message",
+              "displayName": "first_message",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "recommended_status",
+              "displayName": "recommended_status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "tenure_years_current_company",
+              "displayName": "tenure_years_current_company",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "previous_company",
+              "displayName": "previous_company",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "previous_title",
+              "displayName": "previous_title",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "profile_last_updated",
+              "displayName": "profile_last_updated",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "public_activity_level",
+              "displayName": "public_activity_level",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "role_family",
+              "displayName": "role_family",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "skill_tags",
+              "displayName": "skill_tags",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "inferred_seniority",
+              "displayName": "inferred_seniority",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "latent_seniority_score",
+              "displayName": "latent_seniority_score",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "tenure_signal",
+              "displayName": "tenure_signal",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "profile_freshness_signal",
+              "displayName": "profile_freshness_signal",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "company_environment_signal",
+              "displayName": "company_environment_signal",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "mobility_signal",
+              "displayName": "mobility_signal",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "seniority_reasoning",
+              "displayName": "seniority_reasoning",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "recommended_approach_timing",
+              "displayName": "recommended_approach_timing",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "latent_outreach_angle",
+              "displayName": "latent_outreach_angle",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "created_at",
+              "displayName": "created_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "195c342b-633a-481b-92b5-5cc29a9d9feb",
+      "name": "Append candidate_leads",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [
+        1392,
+        432
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "ERU5W8Lro76UsixY",
+          "name": "Google Sheets OAuth2 API"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read market_signals",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Read candidate_seed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read market_signals": {
+      "main": [
+        [
+          {
+            "node": "Group Signals by Company",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Group Signals by Company": {
+      "main": [
+        [
+          {
+            "node": "OpenAI - Score Talent Pool",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI - Score Talent Pool": {
+      "main": [
+        [
+          {
+            "node": "Parse Talent Pool JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Talent Pool JSON": {
+      "main": [
+        [
+          {
+            "node": "Append talent_pools",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read candidate_seed": {
+      "main": [
+        [
+          {
+            "node": "OpenAI - Generate Candidate Intelligence",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI - Generate Candidate Intelligence": {
+      "main": [
+        [
+          {
+            "node": "Parse Candidate JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Candidate JSON": {
+      "main": [
+        [
+          {
+            "node": "OpenAI - Infer Latent Seniority",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI - Infer Latent Seniority": {
+      "main": [
+        [
+          {
+            "node": "Parse Latent Seniority JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Latent Seniority JSON": {
+      "main": [
+        [
+          {
+            "node": "Append candidate_leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "09223807-f6ee-4bba-a653-6bd9e10404f3",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "f77a87671be770b6d9ddd8adb5517f104760a4bca53f9786441e20f0d0b605dd"
+  },
+  "id": "xnkhlEbWK66zvHiG",
+  "tags": []
+}
